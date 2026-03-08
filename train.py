@@ -25,8 +25,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import requests
-
 # ── Env / agent helpers ────────────────────────────────────────────────────────
 
 ENV_URL = "http://localhost:7860"
@@ -109,30 +107,29 @@ def infer_success(obs: dict) -> bool:
     return bool(obs.get("succeeded", False))
 
 
-# ── HTTP env calls ─────────────────────────────────────────────────────────────
+ENV_URL = "http://localhost:7860"
 
-def http_reset() -> dict:
-    r = requests.post(f"{ENV_URL}/reset", json={}, timeout=15)
-    r.raise_for_status()
-    d = r.json()
-    obs = d["observation"]
-    obs["done"] = d.get("done", False)
-    obs["reward"] = float(d.get("reward") or 0.0)
-    obs["_session_id"] = d.get("session_id")
+# ── WebSocket env calls via TimetravelEnv client ───────────────────────────────
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(__file__))
+from client import TimetravelEnv
+from models import TimetravelAction
+
+
+def env_reset(env: TimetravelEnv) -> dict:
+    result = env.reset()
+    obs = result.observation.model_dump()
+    obs["done"] = result.done
+    obs["reward"] = float(result.reward or 0.0)
     return obs
 
 
-def http_step(action_json: str, session_id: str | None = None) -> dict:
-    payload: dict = {"action": {"content": action_json}}
-    if session_id is not None:
-        payload["session_id"] = session_id
-    r = requests.post(f"{ENV_URL}/step", json=payload, timeout=15)
-    r.raise_for_status()
-    d = r.json()
-    obs = d["observation"]
-    obs["done"] = d.get("done", False)
-    obs["reward"] = float(d.get("reward") or 0.0)
-    obs["_session_id"] = session_id
+def env_step(env: TimetravelEnv, action_json: str) -> dict:
+    result = env.step(TimetravelAction(content=action_json))
+    obs = result.observation.model_dump()
+    obs["done"] = result.done
+    obs["reward"] = float(result.reward or 0.0)
     return obs
 
 
@@ -192,85 +189,81 @@ def collect_episode(
     debug_prefix: str | None = None,
     debug_full_tokens: bool = False,
 ) -> tuple[list[tuple], bool]:
-    """Roll out one episode via the OpenEnv HTTP server and return per-step transitions."""
+    """Roll out one episode and return per-step transitions."""
     import torch
 
-    obs = http_reset()
-    session_id = obs.get("_session_id")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    transitions: list[tuple] = []
+    with TimetravelEnv(base_url=ENV_URL) as env:
+        obs = env_reset(env)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        transitions: list[tuple] = []
 
-    model.eval()
-    with torch.inference_mode():
-        for step in range(max_episode_steps):
-            messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
-            prompt_ids = _apply_template(tokenizer, messages, model.device)
-            action_ids = _generate_until_valid_json_action(
-                model,
-                tokenizer,
-                prompt_ids,
-                max_total_new_tokens=generation_max_new_tokens,
-                chunk_new_tokens=min(32, generation_max_new_tokens),
-                temperature=temperature,
-                do_sample=True,
-            )
-            action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
-            action = parse_action(action_text)
-            if action is None:
-                action = {"thinking": "invalid", "action": "abandon", "args": {}}
-
-            obs = http_step(format_action(action), session_id)
-
-            if debug_prefix is not None:
-                env_msg = obs_to_text(obs, step + 1)
-                print(
-                    f"\n{debug_prefix} ── step {step+1}/{max_episode_steps} ──────────────────",
-                    flush=True,
+        model.eval()
+        with torch.inference_mode():
+            for step in range(max_episode_steps):
+                messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
+                prompt_ids = _apply_template(tokenizer, messages, model.device)
+                action_ids = _generate_until_valid_json_action(
+                    model,
+                    tokenizer,
+                    prompt_ids,
+                    max_total_new_tokens=generation_max_new_tokens,
+                    chunk_new_tokens=min(32, generation_max_new_tokens),
+                    temperature=temperature,
+                    do_sample=True,
                 )
-                print(f"{debug_prefix} ENV  → {messages[-1]['content']!r}", flush=True)
-                print(f"{debug_prefix} MODEL→ {action_text!r}", flush=True)
-                print(
-                    f"{debug_prefix} RESULT pos={obs['position']!r} "
-                    f"budget={obs.get('budget_remaining')} "
-                    f"reward={obs['reward']:.3f} done={obs['done']} "
-                    f"tokens={len(action_ids)}",
-                    flush=True,
-                )
-                if obs.get("temporal_note"):
-                    print(f"{debug_prefix} TEMPORAL_NOTE={obs['temporal_note']!r}", flush=True)
-                if obs.get("message"):
-                    print(f"{debug_prefix} ENV_MSG={obs['message']!r}", flush=True)
-                if debug_full_tokens:
-                    full_decoded = tokenizer.decode(
-                        action_ids,
-                        skip_special_tokens=False,
-                        clean_up_tokenization_spaces=False,
+                action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
+                action = parse_action(action_text)
+                if action is None:
+                    action = {"thinking": "invalid", "action": "abandon", "args": {}}
+
+                obs = env_step(env, format_action(action))
+
+                if debug_prefix is not None:
+                    print(
+                        f"\n{debug_prefix} ── step {step+1}/{max_episode_steps} ──────────────────",
+                        flush=True,
                     )
-                    print(f"{debug_prefix} token_ids={action_ids.tolist()}", flush=True)
-                    print(f"{debug_prefix} full_decoded={full_decoded!r}", flush=True)
+                    print(f"{debug_prefix} ENV  → {messages[-1]['content']!r}", flush=True)
+                    print(f"{debug_prefix} MODEL→ {action_text!r}", flush=True)
+                    print(
+                        f"{debug_prefix} RESULT pos={obs['position']!r} "
+                        f"budget={obs.get('budget_remaining')} "
+                        f"reward={obs['reward']:.3f} done={obs['done']} "
+                        f"tokens={len(action_ids)}",
+                        flush=True,
+                    )
+                    if obs.get("temporal_note"):
+                        print(f"{debug_prefix} TEMPORAL_NOTE={obs['temporal_note']!r}", flush=True)
+                    if obs.get("message"):
+                        print(f"{debug_prefix} ENV_MSG={obs['message']!r}", flush=True)
+                    if debug_full_tokens:
+                        full_decoded = tokenizer.decode(
+                            action_ids,
+                            skip_special_tokens=False,
+                            clean_up_tokenization_spaces=False,
+                        )
+                        print(f"{debug_prefix} token_ids={action_ids.tolist()}", flush=True)
+                        print(f"{debug_prefix} full_decoded={full_decoded!r}", flush=True)
 
-            messages.append({"role": "assistant", "content": format_action(action)})
-            transitions.append((prompt_ids[0].cpu(), action_ids.cpu(), float(obs["reward"])))
+                messages.append({"role": "assistant", "content": format_action(action)})
+                transitions.append((prompt_ids[0].cpu(), action_ids.cpu(), float(obs["reward"])))
 
-            if action.get("action") == "branch":
-                ago = action.get("args", {}).get("ago", 0)
-                if isinstance(ago, (int, str)):
-                    try:
-                        ago = int(ago)
-                    except (TypeError, ValueError):
-                        ago = 0
-                if ago > 0:
-                    # Truncate chat history to the rewound point so the agent cannot
-                    # see oracle observations from the erased future. This forces it
-                    # to pass information through the instruction field.
-                    keep = 1 + 2 * (step + 1 - ago)
-                    messages = messages[:max(keep, 1)]
+                if action.get("action") == "branch":
+                    ago = action.get("args", {}).get("ago", 0)
+                    if isinstance(ago, (int, str)):
+                        try:
+                            ago = int(ago)
+                        except (TypeError, ValueError):
+                            ago = 0
+                    if ago > 0:
+                        keep = 1 + 2 * (step + 1 - ago)
+                        messages = messages[:max(keep, 1)]
 
-            if obs["done"]:
-                break
+                if obs["done"]:
+                    break
 
-    model.train()
-    return transitions, infer_success(obs)
+        model.train()
+        return transitions, infer_success(obs)
 
 
 def compute_episode_return(transitions) -> float:
@@ -305,39 +298,39 @@ def evaluate_model(
     model.eval()
     with torch.inference_mode():
         for _ in range(num_episodes):
-            obs = http_reset()
-            session_id = obs.get("_session_id")
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            used_branch = False
+            with TimetravelEnv(base_url=ENV_URL) as env:
+                obs = env_reset(env)
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                used_branch = False
 
-            for step in range(max_episode_steps):
-                messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
-                prompt_ids = _apply_template(tokenizer, messages, model.device)
-                action_ids = _generate_until_valid_json_action(
-                    model,
-                    tokenizer,
-                    prompt_ids,
-                    max_total_new_tokens=max_new_tokens,
-                    chunk_new_tokens=min(32, max_new_tokens),
-                    temperature=0.0,
-                    do_sample=False,
-                )
-                action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
-                action = parse_action(action_text)
-                if action is None:
-                    action = {"thinking": "invalid", "action": "abandon", "args": {}}
+                for step in range(max_episode_steps):
+                    messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
+                    prompt_ids = _apply_template(tokenizer, messages, model.device)
+                    action_ids = _generate_until_valid_json_action(
+                        model,
+                        tokenizer,
+                        prompt_ids,
+                        max_total_new_tokens=max_new_tokens,
+                        chunk_new_tokens=min(32, max_new_tokens),
+                        temperature=0.0,
+                        do_sample=False,
+                    )
+                    action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
+                    action = parse_action(action_text)
+                    if action is None:
+                        action = {"thinking": "invalid", "action": "abandon", "args": {}}
 
-                messages.append({"role": "assistant", "content": format_action(action)})
-                obs = http_step(format_action(action), session_id)
+                    messages.append({"role": "assistant", "content": format_action(action)})
+                    obs = env_step(env, format_action(action))
 
-                if action.get("action") == "branch":
-                    used_branch = True
+                    if action.get("action") == "branch":
+                        used_branch = True
 
-                if obs["done"]:
-                    break
+                    if obs["done"]:
+                        break
 
-            successes += int(infer_success(obs))
-            branch_used += int(used_branch)
+                successes += int(infer_success(obs))
+                branch_used += int(used_branch)
 
     episodes = num_episodes
     return {
