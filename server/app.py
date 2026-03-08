@@ -1,5 +1,6 @@
 """Composite FastAPI application mounting both TimeTravel and TextWorld environments."""
 
+import sys
 from fastapi import FastAPI
 
 try:
@@ -41,6 +42,7 @@ from .textworld_environment import TextworldEnvironment
 # Sub-applications
 # ------------------------------------------------------------------
 
+print("[startup] creating timetravel app...", flush=True)
 timetravel_app = create_app(
     TimetravelEnvironment,
     TimetravelAction,
@@ -48,7 +50,9 @@ timetravel_app = create_app(
     env_name="timetravel",
     max_concurrent_envs=64,
 )
+print("[startup] timetravel app created", flush=True)
 
+print("[startup] creating textworld app...", flush=True)
 textworld_app = create_app(
     TextworldEnvironment,
     TextworldAction,
@@ -56,14 +60,17 @@ textworld_app = create_app(
     env_name="textworld",
     max_concurrent_envs=32,
 )
+print("[startup] textworld app created", flush=True)
 
 # ------------------------------------------------------------------
 # Composite root application
 # ------------------------------------------------------------------
 
+print("[startup] mounting apps...", flush=True)
 app = FastAPI(title="TimeTravelOpenEnv")
 app.mount("/timetravel", timetravel_app)
 app.mount("/textworld", textworld_app)
+print("[startup] all apps mounted, ready", flush=True)
 
 
 def main(host: str = "0.0.0.0", port: int = 7860):
