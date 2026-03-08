@@ -27,10 +27,11 @@ NUM_ROLLOUTS = 8   # generations per prompt for GRPO
 # ── Model ──────────────────────────────────────────────────────────────────────
 from unsloth import FastLanguageModel, is_bfloat16_supported
 
+import torch
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_SEQ_LEN,
-    dtype=None,
+    dtype=torch.bfloat16,
     load_in_4bit=True,
 )
 
@@ -56,14 +57,14 @@ def _apply_chat_template_no_thinking(*args, **kwargs):
 tokenizer.apply_chat_template = _apply_chat_template_no_thinking
 
 # ── Environment helpers ─────────────────────────────────────────────────────────
-def env_reset(sid: str) -> str:
-    r = requests.post(f"{ENV_URL}/reset", json={"session_id": sid}, timeout=10)
+def env_reset() -> str:
+    r = requests.post(f"{ENV_URL}/reset", json={}, timeout=10)
     r.raise_for_status()
     return r.json()["observation"]["message"]
 
-def env_step(action_json: str, sid: str):
+def env_step(action_json: str):
     r = requests.post(f"{ENV_URL}/step",
-                      json={"content": action_json, "session_id": sid},
+                      json={"content": action_json},
                       timeout=10)
     r.raise_for_status()
     d = r.json()
@@ -77,15 +78,14 @@ def timetravel_reward(prompts: list[str], completions: list[str], **kwargs) -> l
     global _reward_counter
     rewards = []
     for prompt, completion in zip(prompts, completions):
-        sid = f"train_{_reward_counter}"
         _reward_counter += 1
         try:
-            env_reset(sid)
+            env_reset()
             final_reward = 0.0
             for line in completion.splitlines():
                 line = line.strip()
                 if line.startswith("{"):
-                    _, _, reward, done = env_step(line, sid)
+                    _, _, reward, done = env_step(line)
                     if done:
                         final_reward = reward
                         break
