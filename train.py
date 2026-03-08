@@ -220,21 +220,34 @@ def collect_episode(
             obs = http_step(format_action(action))
 
             if debug_prefix is not None:
+                env_msg = obs_to_text(obs, step + 1)
                 print(
-                    f"{debug_prefix} step={step+1} action={action.get('action')!r} "
-                    f"pos={obs['position']} reward={obs['reward']:.3f} done={obs['done']}",
+                    f"\n{debug_prefix} ── step {step+1}/{max_episode_steps} ──────────────────",
                     flush=True,
                 )
+                print(f"{debug_prefix} ENV  → {messages[-2]['content']!r}", flush=True)
+                print(f"{debug_prefix} MODEL→ {action_text!r}", flush=True)
+                print(
+                    f"{debug_prefix} RESULT pos={obs['position']!r} "
+                    f"budget={obs.get('budget_remaining')} "
+                    f"reward={obs['reward']:.3f} done={obs['done']} "
+                    f"tokens={len(action_ids)}",
+                    flush=True,
+                )
+                if obs.get("temporal_note"):
+                    print(f"{debug_prefix} TEMPORAL_NOTE={obs['temporal_note']!r}", flush=True)
+                if obs.get("message"):
+                    print(f"{debug_prefix} ENV_MSG={obs['message']!r}", flush=True)
                 if debug_full_tokens:
                     full_decoded = tokenizer.decode(
                         action_ids,
                         skip_special_tokens=False,
                         clean_up_tokenization_spaces=False,
                     )
-                    print(f"{debug_prefix} tokens={len(action_ids)} token_ids={action_ids.tolist()}", flush=True)
+                    print(f"{debug_prefix} token_ids={action_ids.tolist()}", flush=True)
                     print(f"{debug_prefix} full_decoded={full_decoded!r}", flush=True)
 
-            messages.append({"role": "assistant", "content": action_text})
+            messages.append({"role": "assistant", "content": format_action(action)})
             transitions.append((prompt_ids[0].cpu(), action_ids.cpu(), float(obs["reward"])))
 
             if action.get("action") == "branch":
@@ -311,7 +324,7 @@ def evaluate_model(
                 if action is None:
                     action = {"thinking": "invalid", "action": "abandon", "args": {}}
 
-                messages.append({"role": "assistant", "content": action_text})
+                messages.append({"role": "assistant", "content": format_action(action)})
                 obs = http_step(format_action(action))
 
                 if action.get("action") == "branch":
@@ -339,9 +352,9 @@ def main() -> None:
     parser.add_argument("--output-dir", default="runs/timetravel")
     parser.add_argument("--env-url", default="http://localhost:7860")
 
-    parser.add_argument("--max-seq-length", type=int, default=4096)
+    parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--load-in-4bit", action="store_true", default=True)
-    parser.add_argument("--lora-rank", type=int, default=32)
+    parser.add_argument("--lora-rank", type=int, default=4)
 
     parser.add_argument("--num-train-steps", type=int, default=300)
     parser.add_argument("--episodes-per-step", type=int, default=4)
@@ -352,7 +365,7 @@ def main() -> None:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
 
     parser.add_argument("--max-episode-steps", type=int, default=12)
-    parser.add_argument("--generation-max-new-tokens", type=int, default=128)
+    parser.add_argument("--generation-max-new-tokens", type=int, default=64)
 
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-episodes", type=int, default=20)
@@ -400,7 +413,6 @@ def main() -> None:
         model_name=args.model_name,
         load_in_4bit=args.load_in_4bit,
         max_seq_length=args.max_seq_length,
-        dtype=torch.float16,
     )
     model = FastLanguageModel.get_peft_model(
         model,
@@ -431,8 +443,8 @@ def main() -> None:
                 group_rollouts = []
                 for gen_idx in range(args.num_generations):
                     debug_prefix = None
-                    if args.print_actions and train_step < args.print_actions_train_steps:
-                        debug_prefix = f"[train_step={train_step} ep={episode_idx} gen={gen_idx}]"
+                    if args.print_actions:
+                        debug_prefix = f"[step={train_step}/{args.num_train_steps} ep={episode_idx} gen={gen_idx}]"
                     transitions, success = collect_episode(
                         model,
                         tokenizer,
