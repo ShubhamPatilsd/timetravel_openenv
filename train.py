@@ -15,7 +15,7 @@ from datasets import Dataset
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
-BASE_MODEL   = os.getenv("MODEL", "unsloth/Qwen3-14B-unsloth-bnb-4bit")
+BASE_MODEL   = os.getenv("MODEL", "unsloth/Qwen3-14B")
 MAX_SEQ_LEN  = 4096
 LORA_RANK    = 32
 BUDGET       = 12
