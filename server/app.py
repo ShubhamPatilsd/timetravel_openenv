@@ -68,6 +68,11 @@ print("[startup] textworld app created", flush=True)
 
 print("[startup] mounting apps...", flush=True)
 app = FastAPI(title="TimeTravelOpenEnv")
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
 app.mount("/timetravel", timetravel_app)
 app.mount("/textworld", textworld_app)
 print("[startup] all apps mounted, ready", flush=True)
