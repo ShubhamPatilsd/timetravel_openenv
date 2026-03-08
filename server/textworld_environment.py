@@ -102,8 +102,9 @@ class TextworldEnvironment(Environment):
         game_file: Optional[str] = None,
         seed: int = 0,
     ) -> None:
-        self._budget = budget
-        self._game_file = game_file
+        import os
+        self._budget = int(os.environ.get("TEXTWORLD_BUDGET", budget))
+        self._game_file = game_file or os.environ.get("TEXTWORLD_GAME_FILE") or None
         self._default_seed = seed
 
         # Runtime state – initialised properly in reset()
@@ -120,11 +121,59 @@ class TextworldEnvironment(Environment):
         self._state: State = State(episode_id=str(uuid4()), step_count=0)
 
     # ------------------------------------------------------------------
+    # Auto-generated game cache (class-level, generated once per process)
+    # ------------------------------------------------------------------
+
+    _auto_game_file: Optional[str] = None
+
+    @classmethod
+    def _get_or_generate_game(cls) -> Optional[str]:
+        """Try to auto-generate a TextWorld game if textworld is installed.
+
+        Returns the path to the generated .ulx file, or None if textworld
+        is not installed (falls back to _StubBackend).
+        """
+        if cls._auto_game_file is not None:
+            return cls._auto_game_file
+        try:
+            import tempfile
+            import textworld  # type: ignore
+            import textworld.generator as twgen  # type: ignore
+
+            options = twgen.GameOptions()
+            options.seeds = 42
+            options.nb_rooms = 5
+            options.nb_objects = 10
+            options.chaining.max_depth = 3
+            options.chaining.max_breadth = 2
+
+            tmpdir = tempfile.mkdtemp(prefix="tw_auto_")
+            options.path = tmpdir
+
+            game = twgen.make_game(options)
+            game_file = twgen.compile_game(game, options)
+
+            cls._auto_game_file = game_file
+            print(
+                f"[textworld] Auto-generated game: {game_file}",
+                flush=True,
+            )
+            return game_file
+        except Exception as exc:
+            print(
+                f"[textworld] Could not auto-generate game ({exc}); "
+                "using stub backend.",
+                flush=True,
+            )
+            return None
+
+    # ------------------------------------------------------------------
     # Backend factory
     # ------------------------------------------------------------------
 
     def _make_backend(self) -> Any:
-        if self._game_file is None:
+        game_file = self._game_file or self._get_or_generate_game()
+        if game_file is None:
             return self._StubBackend(seed=self._episode_seed)
         try:
             import textworld  # type: ignore
@@ -134,7 +183,7 @@ class TextworldEnvironment(Environment):
                 "Install with `pip install textworld`."
             ) from exc
 
-        env = textworld.start(self._game_file)
+        env = textworld.start(game_file)
         return _NativeAdapter(env)
 
     # ------------------------------------------------------------------
