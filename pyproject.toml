@@ -5,13 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openenv-timetravel"
 version = "0.1.0"
-description = "Time Travel Rewind environment for OpenEnv - temporal control path puzzle"
+description = "Time Travel Rewind environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
-    "openenv-core[core]>=0.2.0",
+    "openenv-core[core]==0.2.1",
+    "uvicorn>=0.29.0",
 ]
 
 [project.optional-dependencies]
+train = [
+    "trl>=0.12.0",
+    "peft>=0.11.0",
+    "accelerate>=0.30.0",
+    "bitsandbytes>=0.43.0",
+    "datasets>=2.19.0",
+    "requests>=2.31.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -24,3 +33,15 @@ server = "server.app:main"
 include-package-data = true
 packages = ["server"]
 package-dir = {"server" = "server"}
+
+# PyTorch CUDA index (uv will pull torch from here for train group)
+# Change cu121 -> cu118 / cu124 to match your CUDA version
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu121", marker = "extra == 'train'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
