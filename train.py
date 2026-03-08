@@ -113,11 +113,39 @@ ENV_URL = "http://localhost:7860"
 
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(__file__))
-from client import TimetravelEnv
-from models import TimetravelAction
+from models import TimetravelAction, TimetravelObservation
+from openenv.core import EnvClient
+from openenv.core.client_types import StepResult
 
 
-def env_reset(env: TimetravelEnv) -> dict:
+class TimetravelEnv(EnvClient):
+    def _step_payload(self, action):
+        return {"content": action}
+
+    def _parse_result(self, payload):
+        obs_data = payload.get("observation", {})
+        observation = TimetravelObservation(
+            message=obs_data.get("message", ""),
+            position=obs_data.get("position", "start"),
+            budget_remaining=obs_data.get("budget_remaining", 0),
+            active_timeline_id=obs_data.get("active_timeline_id", 0),
+            num_branches=obs_data.get("num_branches", 0),
+            read_sign_count=obs_data.get("read_sign_count", 0),
+            succeeded=obs_data.get("succeeded", False),
+            protocol_violations=obs_data.get("protocol_violations", 0),
+            temporal_note=obs_data.get("temporal_note"),
+            done=payload.get("done", False),
+            reward=payload.get("reward"),
+            metadata=obs_data.get("metadata", {}),
+        )
+        return StepResult(observation=observation, reward=payload.get("reward"), done=payload.get("done", False))
+
+    def _parse_state(self, payload):
+        from openenv.core.env_server.types import State
+        return State(episode_id=payload.get("episode_id"), step_count=payload.get("step_count", 0))
+
+
+def env_reset(env) -> dict:
     result = env.reset()
     obs = result.observation.model_dump()
     obs["done"] = result.done
@@ -125,8 +153,8 @@ def env_reset(env: TimetravelEnv) -> dict:
     return obs
 
 
-def env_step(env: TimetravelEnv, action_json: str) -> dict:
-    result = env.step(TimetravelAction(content=action_json))
+def env_step(env, action_json: str) -> dict:
+    result = env.step(action_json)
     obs = result.observation.model_dump()
     obs["done"] = result.done
     obs["reward"] = float(result.reward or 0.0)
