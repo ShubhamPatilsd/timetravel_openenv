@@ -15,7 +15,7 @@ from datasets import Dataset
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
-BASE_MODEL   = os.getenv("MODEL", "Qwen/Qwen2.5-7B-Instruct")
+BASE_MODEL   = os.getenv("MODEL", "unsloth/Qwen3-14B-unsloth-bnb-4bit")
 MAX_SEQ_LEN  = 4096
 LORA_RANK    = 32
 BUDGET       = 12
@@ -46,6 +46,14 @@ model = FastLanguageModel.get_peft_model(
     random_state=42,
 )
 print(f"Loaded {BASE_MODEL} with LoRA rank {LORA_RANK}")
+
+# Disable Qwen3 thinking tokens — patch apply_chat_template so TRL's
+# internal tokenization always passes enable_thinking=False.
+_orig_apply_chat_template = tokenizer.apply_chat_template
+def _apply_chat_template_no_thinking(*args, **kwargs):
+    kwargs.setdefault("enable_thinking", False)
+    return _orig_apply_chat_template(*args, **kwargs)
+tokenizer.apply_chat_template = _apply_chat_template_no_thinking
 
 # ── Environment helpers ─────────────────────────────────────────────────────────
 def env_reset(sid: str) -> str:
