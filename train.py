@@ -27,7 +27,7 @@ from typing import Optional
 
 # ── Env / agent helpers ────────────────────────────────────────────────────────
 
-ENV_URL = "http://localhost:7860"
+ENV_URL = "http://localhost:7860/timetravel"
 
 SYSTEM_PROMPT = """You are an agent navigating a time-travel puzzle.
 
@@ -107,7 +107,7 @@ def infer_success(obs: dict) -> bool:
     return bool(obs.get("succeeded", False))
 
 
-ENV_URL = "http://localhost:7860"
+ENV_URL = "http://localhost:7860/timetravel"
 
 # ── WebSocket env calls via TimetravelEnv client ───────────────────────────────
 
@@ -374,7 +374,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train an Unsloth model on Time Travel Rewind")
     parser.add_argument("--model-name", default="unsloth/Qwen3-14B-unsloth-bnb-4bit")
     parser.add_argument("--output-dir", default="runs/timetravel")
-    parser.add_argument("--env-url", default="http://localhost:7860")
+    parser.add_argument("--env-url", default="http://localhost:7860/timetravel")
 
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--load-in-4bit", action="store_true", default=True)

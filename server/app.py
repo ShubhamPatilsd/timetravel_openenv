@@ -1,4 +1,6 @@
-"""FastAPI application for the Time Travel Rewind environment."""
+"""Composite FastAPI application mounting both TimeTravel and TextWorld environments."""
+
+from fastapi import FastAPI
 
 try:
     from openenv.core.env_server.http_server import create_app
@@ -7,16 +9,39 @@ except Exception as e:
         "openenv-core is required. Install with: pip install 'openenv-core[core]'"
     ) from e
 
+# ------------------------------------------------------------------
+# TimeTravel imports
+# ------------------------------------------------------------------
+
 try:
     from ..models import TimetravelAction, TimetravelObservation
 except ImportError:
-    import sys, os
+    import sys
+    import os
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     from models import TimetravelAction, TimetravelObservation
 
 from .timetravel_environment import TimetravelEnvironment
 
-app = create_app(
+# ------------------------------------------------------------------
+# TextWorld imports
+# ------------------------------------------------------------------
+
+try:
+    from .textworld_models import TextworldAction, TextworldObservation
+except ImportError:
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from textworld_models import TextworldAction, TextworldObservation
+
+from .textworld_environment import TextworldEnvironment
+
+# ------------------------------------------------------------------
+# Sub-applications
+# ------------------------------------------------------------------
+
+timetravel_app = create_app(
     TimetravelEnvironment,
     TimetravelAction,
     TimetravelObservation,
@@ -24,8 +49,24 @@ app = create_app(
     max_concurrent_envs=64,
 )
 
+textworld_app = create_app(
+    TextworldEnvironment,
+    TextworldAction,
+    TextworldObservation,
+    env_name="textworld",
+    max_concurrent_envs=32,
+)
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+# ------------------------------------------------------------------
+# Composite root application
+# ------------------------------------------------------------------
+
+app = FastAPI(title="TimeTravelOpenEnv")
+app.mount("/timetravel", timetravel_app)
+app.mount("/textworld", textworld_app)
+
+
+def main(host: str = "0.0.0.0", port: int = 7860):
     import uvicorn
     uvicorn.run(app, host=host, port=port)
 
@@ -33,6 +74,6 @@ def main(host: str = "0.0.0.0", port: int = 8000):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
     main(port=args.port)
