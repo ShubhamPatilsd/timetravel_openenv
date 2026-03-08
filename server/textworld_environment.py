@@ -285,6 +285,8 @@ class TextworldEnvironment(Environment):
         # Use intermediate_reward if available (denser signal); fall back to score delta
         intermediate_reward = backend_info.get("intermediate_reward", 0.0)
         shaped_reward = intermediate_reward if intermediate_reward != 0.0 else (score - prev_score)
+        if intermediate_reward != 0.0:
+            print(f"[textworld] intermediate_reward={intermediate_reward:.3f} cmd={command!r}", flush=True)
 
         if done:
             self._episode_done = True
