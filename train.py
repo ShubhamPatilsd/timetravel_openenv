@@ -15,14 +15,14 @@ from datasets import Dataset
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
-BASE_MODEL   = os.getenv("MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-MAX_SEQ_LEN  = 2048
-LORA_RANK    = 16
+BASE_MODEL   = os.getenv("MODEL", "Qwen/Qwen2.5-7B-Instruct")
+MAX_SEQ_LEN  = 4096
+LORA_RANK    = 32
 BUDGET       = 12
 GRPO_STEPS   = 200
-BATCH_SIZE   = 2
+BATCH_SIZE   = 4
 GRAD_ACCUM   = 4
-NUM_ROLLOUTS = 4   # generations per prompt for GRPO
+NUM_ROLLOUTS = 8   # generations per prompt for GRPO
 
 # ── Model ──────────────────────────────────────────────────────────────────────
 from unsloth import FastLanguageModel, is_bfloat16_supported

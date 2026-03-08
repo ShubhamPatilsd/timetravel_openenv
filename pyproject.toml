@@ -38,10 +38,10 @@ package-dir = {"server" = "server"}
 # Change cu121 -> cu118 / cu124 to match your CUDA version
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu121", marker = "extra == 'train'" },
+    { index = "pytorch-cu124", marker = "extra == 'train'" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
