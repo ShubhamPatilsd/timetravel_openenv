@@ -85,12 +85,15 @@ def timetravel_reward(prompts: list[str], completions: list[str], **kwargs) -> l
             for line in completion.splitlines():
                 line = line.strip()
                 if line.startswith("{"):
+                    print(f"[reward] sending to env: {line[:120]}", flush=True)
                     _, _, reward, done = env_step(line)
                     if done:
                         final_reward = reward
                         break
         except Exception as e:
-            print(f"[reward] episode error: {e}")
+            print(f"[reward] episode error: {e}", flush=True)
+            # print first 200 chars of completion for debugging
+            print(f"[reward] completion was: {completion[:200]!r}", flush=True)
             final_reward = 0.0
         rewards.append(final_reward)
     return rewards
@@ -127,7 +130,7 @@ grpo_config = GRPOConfig(
     per_device_train_batch_size=BATCH_SIZE,
     gradient_accumulation_steps=GRAD_ACCUM,
     max_steps=GRPO_STEPS,
-    max_completion_length=512,
+    max_completion_length=1024,
     num_generations=NUM_ROLLOUTS,
     temperature=0.7,
     beta=0.001,
@@ -136,6 +139,7 @@ grpo_config = GRPOConfig(
     bf16=False,
     fp16=True,
     report_to="wandb",
+    run_name="timetravel-grpo-qwen3-14b",
 )
 
 trainer = GRPOTrainer(
