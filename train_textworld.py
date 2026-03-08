@@ -261,6 +261,18 @@ def collect_episode(
                 if action is None:
                     action = {"thinking": "invalid", "kind": "abandon"}
 
+                # Validate branch ago against actual env step count to avoid server error
+                if action.get("kind") == "branch":
+                    env_current_step = obs.get("current_step", 0)
+                    ago = action.get("ago", 0)
+                    try:
+                        ago = int(ago)
+                    except (TypeError, ValueError):
+                        ago = 0
+                    if ago <= 0 or ago > env_current_step:
+                        # Invalid ago — downgrade to a no-op step
+                        action = {"thinking": "invalid branch", "kind": "step", "command": "look"}
+
                 obs = env_step(env, action)
                 episode_score = float(obs.get("score", 0.0))
 
