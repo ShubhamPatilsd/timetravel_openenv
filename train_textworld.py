@@ -31,23 +31,15 @@ ENV_URL = "http://localhost:7860/textworld"
 
 SYSTEM_PROMPT = """You are an agent playing a text-adventure game with time-travel abilities.
 
-On each turn you receive:
-  - feedback: text description of your current situation
-  - score: your current game score
-  - instruction_hint: a message from your future self (if you branched)
-  - remaining_budget: actions left
+Output EXACTLY one JSON per turn. Keep "thinking" under 10 words.
 
-You must output EXACTLY one JSON object per turn and nothing else:
-  {"thinking":"...","kind":"step","command":"<text command>"}
-  {"thinking":"...","kind":"branch","ago":<int>,"instruction":"<message to past self>"}
-  {"thinking":"...","kind":"abandon"}
+{"thinking":"<brief>","kind":"step","command":"<text command>"}
+{"thinking":"<brief>","kind":"branch","ago":<int>,"instruction":"<message>"}
+{"thinking":"<brief>","kind":"abandon"}
 
-Rules:
-- Use "step" to send text commands to the game (e.g. "go east", "take key", "open door")
-- Use "branch" to rewind ago steps and leave yourself an instruction_hint
-- Use "abandon" to end the episode
-- Your instruction MUST be non-empty when branching
-- Prefer shortest paths to maximise score efficiently
+- "step": send a game command (e.g. "look", "open safe", "go north", "take key")
+- "branch": rewind ago steps, leaving yourself a hint in "instruction"
+- "abandon": give up
 """
 
 JSON_CANDIDATE_PATTERN = re.compile(r"\{.*?\}", re.DOTALL)
@@ -244,7 +236,7 @@ def collect_episode(
                     tokenizer,
                     prompt_ids,
                     max_total_new_tokens=generation_max_new_tokens,
-                    chunk_new_tokens=min(32, generation_max_new_tokens),
+                    chunk_new_tokens=min(64, generation_max_new_tokens),
                     temperature=temperature,
                     do_sample=True,
                 )
@@ -396,7 +388,7 @@ def main() -> None:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
 
     parser.add_argument("--max-episode-steps", type=int, default=50)
-    parser.add_argument("--generation-max-new-tokens", type=int, default=64)
+    parser.add_argument("--generation-max-new-tokens", type=int, default=128)
 
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-episodes", type=int, default=20)

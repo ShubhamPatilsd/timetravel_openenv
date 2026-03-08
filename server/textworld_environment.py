@@ -183,7 +183,11 @@ class TextworldEnvironment(Environment):
                 "Install with `pip install textworld`."
             ) from exc
 
-        env = textworld.start(game_file)
+        try:
+            infos = textworld.EnvInfos(intermediate_reward=True, won=True, lost=True)
+        except Exception:
+            infos = None
+        env = textworld.start(game_file, infos=infos) if infos is not None else textworld.start(game_file)
         return _NativeAdapter(env)
 
     # ------------------------------------------------------------------
@@ -279,7 +283,9 @@ class TextworldEnvironment(Environment):
         prev_score = float(self._current_state().get("score", 0.0))
         feedback, score, done, backend_info = self._backend.step(command)
 
-        shaped_reward = score - prev_score
+        # Use intermediate_reward if available (denser signal); fall back to score delta
+        intermediate_reward = backend_info.get("intermediate_reward", 0.0)
+        shaped_reward = intermediate_reward if intermediate_reward != 0.0 else (score - prev_score)
 
         if done:
             self._episode_done = True
@@ -491,7 +497,11 @@ class TextworldEnvironment(Environment):
 # ---------------------------------------------------------------------------
 
 class _NativeAdapter:
-    """Wraps a textworld game env so it matches the backend protocol."""
+    """Wraps a textworld game env so it matches the backend protocol.
+
+    Passes intermediate_reward through the info dict so the environment can
+    use it as a denser shaped reward signal (see GitHub issue #205).
+    """
 
     def __init__(self, env: Any) -> None:
         self._env = env
@@ -501,9 +511,11 @@ class _NativeAdapter:
         feedback = getattr(game_state, "feedback", "")
         score = float(getattr(game_state, "score", 0.0) or 0.0)
         done = bool(getattr(game_state, "game_ended", False))
-        return feedback, score, done, {}
+        intermediate_reward = float(getattr(game_state, "intermediate_reward", 0.0) or 0.0)
+        return feedback, score, done, {"intermediate_reward": intermediate_reward}
 
     def step(self, command: str) -> tuple[str, float, bool, Dict[str, Any]]:
         game_state, score, done = self._env.step(command)
         feedback = getattr(game_state, "feedback", "")
-        return feedback, float(score), bool(done), {}
+        intermediate_reward = float(getattr(game_state, "intermediate_reward", 0.0) or 0.0)
+        return feedback, float(score), bool(done), {"intermediate_reward": intermediate_reward}
