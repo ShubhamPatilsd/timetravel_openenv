@@ -220,6 +220,9 @@ def collect_episode(
 ) -> tuple[list[tuple], bool]:
     import torch
 
+    # Keep system prompt + at most this many recent user/assistant pairs
+    _MAX_HISTORY_TURNS = 6
+
     with TextworldEnv(base_url=ENV_URL) as env:
         obs = env_reset(env)
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -229,6 +232,10 @@ def collect_episode(
         model.eval()
         with torch.inference_mode():
             for step in range(max_episode_steps):
+                # Cap history: system prompt + last _MAX_HISTORY_TURNS pairs
+                if len(messages) > 1 + _MAX_HISTORY_TURNS * 2:
+                    messages = messages[:1] + messages[-(  _MAX_HISTORY_TURNS * 2):]
+
                 messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
                 prompt_ids = _apply_template(tokenizer, messages, model.device)
                 action_ids = _generate_until_valid_json_action(
@@ -241,6 +248,9 @@ def collect_episode(
                     do_sample=True,
                 )
                 action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
+                # Strip Qwen3 thinking block residue (</think> and anything before it)
+                if "</think>" in action_text:
+                    action_text = action_text.split("</think>")[-1].strip()
                 action = parse_action(action_text)
                 if action is None:
                     action = {"thinking": "invalid", "kind": "abandon"}
