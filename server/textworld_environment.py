@@ -124,7 +124,7 @@ class TextworldEnvironment(Environment):
     # Auto-generated game cache (class-level, generated once per process)
     # ------------------------------------------------------------------
 
-    _auto_game_file: Optional[str] = None
+    _auto_game_file: Optional[str] = None  # cleared on server restart
 
     @classmethod
     def _get_or_generate_game(cls) -> Optional[str]:
@@ -142,10 +142,10 @@ class TextworldEnvironment(Environment):
 
             options = twgen.GameOptions()
             options.seeds = 42
-            options.nb_rooms = 5
-            options.nb_objects = 10
-            options.chaining.max_depth = 3
-            options.chaining.max_breadth = 2
+            options.nb_rooms = 2      # small: 2 rooms only
+            options.nb_objects = 3    # few objects
+            options.chaining.max_depth = 1   # shallow quest: 1 step chain
+            options.chaining.max_breadth = 1
 
             tmpdir = tempfile.mkdtemp(prefix="tw_auto_")
             options.path = tmpdir
