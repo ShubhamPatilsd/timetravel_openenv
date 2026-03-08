@@ -183,17 +183,11 @@ class TextworldEnvironment(Environment):
                 "Install with `pip install textworld`."
             ) from exc
 
-        try:
-            import textworld.gym  # type: ignore
-            import gym  # type: ignore
-            infos = textworld.EnvInfos(intermediate_reward=True, won=True, lost=True, feedback=True)
-            env_id = textworld.gym.register_game(game_file, infos, max_episode_steps=200)
-            gym_env = gym.make(env_id)
-            return _GymAdapter(gym_env)
-        except Exception:
-            # Fall back to basic textworld.start() without intermediate rewards
-            env = textworld.start(game_file)
-            return _NativeAdapter(env)
+        request_infos = textworld.EnvInfos(
+            intermediate_reward=True, won=True, lost=True, feedback=True
+        )
+        env = textworld.start(game_file, request_infos=request_infos)
+        return _NativeAdapter(env)
 
     # ------------------------------------------------------------------
     # OpenEnv interface
@@ -513,16 +507,15 @@ class _NativeAdapter:
 
     def reset(self, seed: Optional[int] = None) -> tuple[str, float, bool, Dict[str, Any]]:
         game_state = self._env.reset()
-        feedback = getattr(game_state, "feedback", "")
-        score = float(getattr(game_state, "score", 0.0) or 0.0)
-        done = bool(getattr(game_state, "game_ended", False))
-        intermediate_reward = float(getattr(game_state, "intermediate_reward", 0.0) or 0.0)
-        return feedback, score, done, {"intermediate_reward": intermediate_reward}
+        feedback = game_state["feedback"] if "feedback" in game_state else getattr(game_state, "feedback", "")
+        score = float(game_state.get("score", 0.0) or 0.0)
+        done = bool(game_state.get("won", False) or game_state.get("lost", False))
+        return feedback, score, done, {"intermediate_reward": 0.0}
 
     def step(self, command: str) -> tuple[str, float, bool, Dict[str, Any]]:
         game_state, score, done = self._env.step(command)
-        feedback = getattr(game_state, "feedback", "")
-        intermediate_reward = float(getattr(game_state, "intermediate_reward", 0.0) or 0.0)
+        feedback = game_state["feedback"] if "feedback" in game_state else getattr(game_state, "feedback", "")
+        intermediate_reward = float(game_state.get("intermediate_reward", 0.0) or 0.0)
         return feedback, float(score), bool(done), {"intermediate_reward": intermediate_reward}
 
 
