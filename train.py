@@ -135,7 +135,7 @@ grpo_config = GRPOConfig(
     save_steps=50,
     bf16=False,
     fp16=True,
-    report_to="none",
+    report_to="wandb",
 )
 
 trainer = GRPOTrainer(
