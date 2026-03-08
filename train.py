@@ -133,8 +133,8 @@ grpo_config = GRPOConfig(
     beta=0.001,
     logging_steps=5,
     save_steps=50,
-    bf16=is_bfloat16_supported(),
-    fp16=not is_bfloat16_supported(),
+    bf16=False,
+    fp16=True,
     report_to="none",
 )
 
