@@ -37,7 +37,13 @@ Output EXACTLY one JSON per turn. Keep "thinking" under 10 words.
 {"thinking":"<brief>","kind":"branch","ago":<int>,"instruction":"<message>"}
 {"thinking":"<brief>","kind":"abandon"}
 
-- "step": send a game command (e.g. "look", "open safe", "go north", "take key")
+- "step": send a game command. Valid verbs:
+    look, examine <obj>, inventory, take <obj>, drop <obj>
+    go north/south/east/west/up/down
+    open <obj>, close <obj>
+    unlock <obj> with <key>, lock <obj> with <key>
+    put <obj> in <container>, insert <obj> into <container>
+    Do NOT use "use X on Y" — it is not recognised.
 - "branch": rewind ago steps, leaving yourself a hint in "instruction"
 - "abandon": give up
 """

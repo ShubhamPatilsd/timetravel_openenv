@@ -184,11 +184,16 @@ class TextworldEnvironment(Environment):
             ) from exc
 
         try:
-            infos = textworld.EnvInfos(intermediate_reward=True, won=True, lost=True)
+            import textworld.gym  # type: ignore
+            import gym  # type: ignore
+            infos = textworld.EnvInfos(intermediate_reward=True, won=True, lost=True, feedback=True)
+            env_id = textworld.gym.register_game(game_file, infos, max_episode_steps=200)
+            gym_env = gym.make(env_id)
+            return _GymAdapter(gym_env)
         except Exception:
-            infos = None
-        env = textworld.start(game_file, infos=infos) if infos is not None else textworld.start(game_file)
-        return _NativeAdapter(env)
+            # Fall back to basic textworld.start() without intermediate rewards
+            env = textworld.start(game_file)
+            return _NativeAdapter(env)
 
     # ------------------------------------------------------------------
     # OpenEnv interface
@@ -518,4 +523,26 @@ class _NativeAdapter:
         game_state, score, done = self._env.step(command)
         feedback = getattr(game_state, "feedback", "")
         intermediate_reward = float(getattr(game_state, "intermediate_reward", 0.0) or 0.0)
+        return feedback, float(score), bool(done), {"intermediate_reward": intermediate_reward}
+
+
+class _GymAdapter:
+    """Wraps a textworld.gym environment to get intermediate_reward reliably."""
+
+    def __init__(self, env: Any) -> None:
+        self._env = env
+
+    def reset(self, seed: Optional[int] = None) -> tuple[str, float, bool, Dict[str, Any]]:
+        obs, infos = self._env.reset()
+        feedback = infos.get("feedback", obs) if isinstance(infos, dict) else obs
+        return feedback, 0.0, False, {"intermediate_reward": 0.0}
+
+    def step(self, command: str) -> tuple[str, float, bool, Dict[str, Any]]:
+        obs, score, done, infos = self._env.step(command)
+        if isinstance(infos, dict):
+            feedback = infos.get("feedback", obs)
+            intermediate_reward = float(infos.get("intermediate_reward", 0.0) or 0.0)
+        else:
+            feedback = obs
+            intermediate_reward = 0.0
         return feedback, float(score), bool(done), {"intermediate_reward": intermediate_reward}
