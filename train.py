@@ -54,6 +54,20 @@ Valid formats:
 JSON_CANDIDATE_PATTERN = re.compile(r"\{.*?\}", re.DOTALL)
 
 
+def _apply_template(tokenizer, messages, device):
+    """Apply chat template and always return a 2D tensor on `device`."""
+    out = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=False,
+        return_tensors="pt",
+    )
+    # Transformers ≥5.x returns BatchEncoding; older versions return a raw tensor
+    if hasattr(out, "input_ids"):
+        out = out.input_ids
+    return out.to(device)
+
+
 def obs_to_text(obs: dict, step_num: int) -> str:
     lines = [
         f"Step {step_num} | Budget remaining: {obs['budget_remaining']}",
@@ -188,12 +202,7 @@ def collect_episode(
     with torch.inference_mode():
         for step in range(max_episode_steps):
             messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
-            prompt_ids = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                enable_thinking=False,
-                return_tensors="pt",
-            ).to(model.device)
+            prompt_ids = _apply_template(tokenizer, messages, model.device)
             action_ids = _generate_until_valid_json_action(
                 model,
                 tokenizer,
@@ -287,12 +296,7 @@ def evaluate_model(
 
             for step in range(max_episode_steps):
                 messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
-                prompt_ids = tokenizer.apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
-                    return_tensors="pt",
-                ).to(model.device)
+                prompt_ids = _apply_template(tokenizer, messages, model.device)
                 action_ids = _generate_until_valid_json_action(
                     model,
                     tokenizer,
