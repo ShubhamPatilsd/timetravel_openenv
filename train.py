@@ -118,20 +118,21 @@ def http_reset() -> dict:
     obs = d["observation"]
     obs["done"] = d.get("done", False)
     obs["reward"] = float(d.get("reward") or 0.0)
+    obs["_session_id"] = d.get("session_id")
     return obs
 
 
-def http_step(action_json: str) -> dict:
-    r = requests.post(
-        f"{ENV_URL}/step",
-        json={"action": {"content": action_json}},
-        timeout=15,
-    )
+def http_step(action_json: str, session_id: str | None = None) -> dict:
+    payload: dict = {"action": {"content": action_json}}
+    if session_id is not None:
+        payload["session_id"] = session_id
+    r = requests.post(f"{ENV_URL}/step", json=payload, timeout=15)
     r.raise_for_status()
     d = r.json()
     obs = d["observation"]
     obs["done"] = d.get("done", False)
     obs["reward"] = float(d.get("reward") or 0.0)
+    obs["_session_id"] = session_id
     return obs
 
 
@@ -195,6 +196,7 @@ def collect_episode(
     import torch
 
     obs = http_reset()
+    session_id = obs.get("_session_id")
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     transitions: list[tuple] = []
 
@@ -217,7 +219,7 @@ def collect_episode(
             if action is None:
                 action = {"thinking": "invalid", "action": "abandon", "args": {}}
 
-            obs = http_step(format_action(action))
+            obs = http_step(format_action(action), session_id)
 
             if debug_prefix is not None:
                 env_msg = obs_to_text(obs, step + 1)
@@ -225,7 +227,7 @@ def collect_episode(
                     f"\n{debug_prefix} ── step {step+1}/{max_episode_steps} ──────────────────",
                     flush=True,
                 )
-                print(f"{debug_prefix} ENV  → {messages[-2]['content']!r}", flush=True)
+                print(f"{debug_prefix} ENV  → {messages[-1]['content']!r}", flush=True)
                 print(f"{debug_prefix} MODEL→ {action_text!r}", flush=True)
                 print(
                     f"{debug_prefix} RESULT pos={obs['position']!r} "
@@ -304,6 +306,7 @@ def evaluate_model(
     with torch.inference_mode():
         for _ in range(num_episodes):
             obs = http_reset()
+            session_id = obs.get("_session_id")
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             used_branch = False
 
@@ -325,7 +328,7 @@ def evaluate_model(
                     action = {"thinking": "invalid", "action": "abandon", "args": {}}
 
                 messages.append({"role": "assistant", "content": format_action(action)})
-                obs = http_step(format_action(action))
+                obs = http_step(format_action(action), session_id)
 
                 if action.get("action") == "branch":
                     used_branch = True
