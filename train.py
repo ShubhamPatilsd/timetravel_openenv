@@ -15,7 +15,7 @@ from datasets import Dataset
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
-BASE_MODEL   = os.getenv("MODEL", "unsloth/Qwen3-14B")
+BASE_MODEL   = os.getenv("MODEL", "unsloth/Qwen3-14B-unsloth-bnb-4bit")
 MAX_SEQ_LEN  = 4096
 LORA_RANK    = 32
 BUDGET       = 12
@@ -31,8 +31,8 @@ import torch
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_SEQ_LEN,
-    dtype=torch.bfloat16,
-    load_in_4bit=False,  # H100 80GB has headroom; avoids fp16/bf16 mismatch with TRL GRPOTrainer
+    dtype=torch.float16,  # bnb-4bit dequantizes in fp16; must match to avoid dtype mismatch
+    load_in_4bit=True,
 )
 
 model = FastLanguageModel.get_peft_model(
