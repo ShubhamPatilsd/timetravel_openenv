@@ -101,9 +101,13 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 
 
+_VALID_ACTION_KEYS = {"kind", "command", "instruction", "ago"}
+
+
 class TextworldEnv(EnvClient):
     def _step_payload(self, action):
-        return action  # action is already a dict
+        # Strip extra keys (e.g. "thinking") — server rejects unknown fields
+        return {k: v for k, v in action.items() if k in _VALID_ACTION_KEYS}
 
     def _parse_result(self, payload):
         obs_data = payload.get("observation", {})
