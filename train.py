@@ -32,7 +32,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_SEQ_LEN,
     dtype=torch.bfloat16,
-    load_in_4bit=True,
+    load_in_4bit=False,  # H100 80GB has headroom; avoids fp16/bf16 mismatch with TRL GRPOTrainer
 )
 
 model = FastLanguageModel.get_peft_model(
