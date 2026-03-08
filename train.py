@@ -64,7 +64,7 @@ def env_reset() -> str:
 
 def env_step(action_json: str):
     r = requests.post(f"{ENV_URL}/step",
-                      json={"content": action_json},
+                      json={"action": {"content": action_json}},
                       timeout=10)
     r.raise_for_status()
     d = r.json()
