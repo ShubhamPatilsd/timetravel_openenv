@@ -53,6 +53,9 @@ Rules:
 JSON_CANDIDATE_PATTERN = re.compile(r"\{.*?\}", re.DOTALL)
 
 
+_MAX_FEEDBACK_CHARS = 600  # cap per-step feedback to prevent context overflow
+
+
 def obs_to_text(obs: dict, step_num: int) -> str:
     lines = [
         f"Step {step_num} | Budget remaining: {obs['remaining_budget']} | Score: {obs.get('score', 0.0):.2f}",
@@ -60,8 +63,16 @@ def obs_to_text(obs: dict, step_num: int) -> str:
     ]
     if obs.get("instruction_hint"):
         lines.append(f"[Message from future self]: {obs['instruction_hint']}")
-    if obs.get("feedback"):
-        lines.append(obs["feedback"])
+    feedback = obs.get("feedback", "")
+    if feedback:
+        # Strip leading ASCII-art banners (lines with only printable non-alpha chars)
+        fb_lines = feedback.splitlines()
+        fb_lines = [l for l in fb_lines if any(c.isalpha() for c in l)]
+        feedback = "\n".join(fb_lines).strip()
+        if len(feedback) > _MAX_FEEDBACK_CHARS:
+            feedback = feedback[:_MAX_FEEDBACK_CHARS] + "..."
+        if feedback:
+            lines.append(feedback)
     return "\n".join(lines)
 
 
@@ -494,6 +505,8 @@ def main() -> None:
                     for prompt_ids, action_ids, _ in transitions:
                         if len(action_ids) == 0:
                             continue
+                        if len(prompt_ids) + len(action_ids) > args.max_seq_length:
+                            continue  # skip sequences that exceed model max length
                         loss = policy_loss(model, prompt_ids, action_ids, advantage)
                         loss.backward()
                         total_loss_value += float(loss.detach().item())
