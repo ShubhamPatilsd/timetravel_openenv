@@ -1,158 +1,533 @@
-"""Local GRPO training against the timetravel OpenEnv server.
+"""GRPO trainer for the Time Travel Rewind OpenEnv environment.
+
+Replicates the Prime Intellect custom GRPO loop from train_reverse_code_door.py
+exactly — same loop structure, same policy_loss, same advantage normalisation,
+same generate-until-valid-JSON approach — adapted to call the OpenEnv HTTP
+server instead of a local env instance.
 
 Usage:
-    # Terminal 1 - start the env server
+    # Terminal 1
     uvicorn server.app:app --host 0.0.0.0 --port 7860
 
-    # Terminal 2 - run training
-    python train.py
+    # Terminal 2
+    uv run python train.py
+    uv run python train.py --num-train-steps 300 --episodes-per-step 4 --num-generations 4
 """
 
+from __future__ import annotations
+
+import argparse
 import json
-import os
+import random
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
 import requests
-from datasets import Dataset
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
-BASE_MODEL   = os.getenv("MODEL", "unsloth/Qwen3-14B-unsloth-bnb-4bit")
-MAX_SEQ_LEN  = 4096
-LORA_RANK    = 32
-BUDGET       = 12
-GRPO_STEPS   = 200
-BATCH_SIZE   = 4
-GRAD_ACCUM   = 4
-NUM_ROLLOUTS = 8   # generations per prompt for GRPO
+# ── Env / agent helpers ────────────────────────────────────────────────────────
 
-# ── Model ──────────────────────────────────────────────────────────────────────
-from unsloth import FastLanguageModel, is_bfloat16_supported
+ENV_URL = "http://localhost:7860"
 
-import torch
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=BASE_MODEL,
-    max_seq_length=MAX_SEQ_LEN,
-    dtype=torch.float16,  # bnb-4bit dequantizes in fp16; must match to avoid dtype mismatch
-    load_in_4bit=True,
-)
+SYSTEM_PROMPT = """You are an agent navigating a time-travel puzzle.
 
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=LORA_RANK,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=LORA_RANK,
-    lora_dropout=0.0,
-    bias="none",
-    use_gradient_checkpointing="unsloth",
-    random_state=42,
-)
-print(f"Loaded {BASE_MODEL} with LoRA rank {LORA_RANK}")
+Map: start -> door -> path-1 -> path-2 -> sign
 
-# Disable Qwen3 thinking tokens — patch apply_chat_template so TRL's
-# internal tokenization always passes enable_thinking=False.
-_orig_apply_chat_template = tokenizer.apply_chat_template
-def _apply_chat_template_no_thinking(*args, **kwargs):
-    kwargs.setdefault("enable_thinking", False)
-    return _orig_apply_chat_template(*args, **kwargs)
-tokenizer.apply_chat_template = _apply_chat_template_no_thinking
+Goal: unlock the door at `door` with the passcode shown at `sign`.
+Budget: limited steps total.
 
-# ── Environment helpers ─────────────────────────────────────────────────────────
-def env_reset() -> str:
-    r = requests.post(f"{ENV_URL}/reset", json={}, timeout=10)
-    r.raise_for_status()
-    return r.json()["observation"]["message"]
+The branch command rewinds time by N steps. After the rewind your chat history is erased back to that point — you will NOT remember what you saw. The only thing that survives is the instruction field, which becomes your temporal note. You MUST embed the exact passcode in the instruction, e.g. "Use passcode AURORA-314 at door". After a branch, read your temporal note to get the passcode.
 
-def env_step(action_json: str):
-    r = requests.post(f"{ENV_URL}/step",
-                      json={"action": {"content": action_json}},
-                      timeout=10)
+Output exactly one JSON object and nothing else. No explanation outside the JSON.
+
+Valid formats:
+  {"thinking":"...","action":"move_forward","args":{}}
+  {"thinking":"...","action":"move_back","args":{}}
+  {"thinking":"...","action":"read_sign","args":{}}
+  {"thinking":"...","action":"open_door","args":{"passcode":"..."}}
+  {"thinking":"...","action":"branch","args":{"ago":N,"instruction":"Use passcode X at door"}}
+  {"thinking":"...","action":"abandon","args":{}}
+"""
+
+JSON_CANDIDATE_PATTERN = re.compile(r"\{.*?\}", re.DOTALL)
+
+
+def obs_to_text(obs: dict, step_num: int) -> str:
+    lines = [
+        f"Step {step_num} | Budget remaining: {obs['budget_remaining']}",
+        f"Position: {obs['position']}",
+    ]
+    if obs.get("temporal_note"):
+        lines.append(f"Temporal note from future self: {obs['temporal_note']}")
+    if obs.get("message"):
+        lines.append(obs["message"])
+    return "\n".join(lines)
+
+
+def parse_action(text: str) -> Optional[dict]:
+    """Parse model output into an action dict, or None on failure."""
+    if not text.strip():
+        return None
+    for candidate in JSON_CANDIDATE_PATTERN.findall(text):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "action" in payload:
+            return payload
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict) and "action" in payload:
+            return payload
+    except json.JSONDecodeError:
+        return None
+    return None
+
+
+def format_action(action: dict) -> str:
+    """Return compact canonical JSON string for chat history."""
+    return json.dumps(action, separators=(",", ":"))
+
+
+def infer_success(obs: dict) -> bool:
+    return bool(obs.get("succeeded", False))
+
+
+# ── HTTP env calls ─────────────────────────────────────────────────────────────
+
+def http_reset() -> dict:
+    r = requests.post(f"{ENV_URL}/reset", json={}, timeout=15)
     r.raise_for_status()
     d = r.json()
     obs = d["observation"]
-    return obs["message"], obs.get("temporal_note"), d.get("reward", 0.0), d.get("done", False)
+    obs["done"] = d.get("done", False)
+    obs["reward"] = float(d.get("reward") or 0.0)
+    return obs
 
-# ── Reward function (called by GRPOTrainer per batch) ──────────────────────────
-_reward_counter = 0
 
-def timetravel_reward(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
-    global _reward_counter
-    rewards = []
-    for prompt, completion in zip(prompts, completions):
-        _reward_counter += 1
-        try:
-            env_reset()
-            final_reward = 0.0
-            for line in completion.splitlines():
-                line = line.strip()
-                if line.startswith("{"):
-                    print(f"[reward] sending to env: {line[:120]}", flush=True)
-                    _, _, reward, done = env_step(line)
-                    if done:
-                        final_reward = reward
-                        break
-        except Exception as e:
-            print(f"[reward] episode error: {e}", flush=True)
-            # print first 200 chars of completion for debugging
-            print(f"[reward] completion was: {completion[:200]!r}", flush=True)
-            final_reward = 0.0
-        rewards.append(final_reward)
-    return rewards
+def http_step(action_json: str) -> dict:
+    r = requests.post(
+        f"{ENV_URL}/step",
+        json={"action": {"content": action_json}},
+        timeout=15,
+    )
+    r.raise_for_status()
+    d = r.json()
+    obs = d["observation"]
+    obs["done"] = d.get("done", False)
+    obs["reward"] = float(d.get("reward") or 0.0)
+    return obs
 
-# ── Dataset ────────────────────────────────────────────────────────────────────
-TASK_PROMPT = (
-    f"Temporal gate mission. Budget: {BUDGET} actions.\n"
-    "Map: start -> door -> path-1 -> path-2 -> sign\n"
-    "You start at `start`. The door is locked and requires a passcode.\n"
-    "The passcode can only be read at `sign`.\n\n"
-    "Output exactly one JSON object per turn:\n"
-    "{\"thinking\":\"...\", \"action\":\"...\", \"args\":{...}}\n\n"
-    "Actions: move_forward, move_back, read_sign, open_door, branch, abandon\n"
-    "  open_door args: {\"passcode\": \"...\"}\n"
-    "  branch args:    {\"ago\": <int>, \"instruction\": \"...\"}\n\n"
-    "Strategy: reach sign, read passcode, branch back near door, open door."
-)
 
-PASSCODES = ("AURORA-314", "CINDER-271", "EMBER-907", "NOVA-553")
-train_dataset = Dataset.from_list([
-    {"prompt": TASK_PROMPT, "answer": pc}
-    for pc in PASSCODES * 30  # 120 rows
-])
+# ── Core training functions (exact Prime Intellect structure) ──────────────────
 
-# ── GRPO Training ──────────────────────────────────────────────────────────────
-from trl import GRPOTrainer, GRPOConfig
+def _generate_until_valid_json_action(
+    model,
+    tokenizer,
+    prompt_ids,
+    *,
+    max_total_new_tokens: int,
+    chunk_new_tokens: int,
+    temperature: float,
+    do_sample: bool,
+):
+    """Generate incrementally until we can parse a full valid JSON action."""
+    import torch
 
-FastLanguageModel.for_training(model)
+    generated = torch.empty(0, dtype=prompt_ids.dtype, device=prompt_ids.device)
+    cursor = prompt_ids
+    tokens_left = max_total_new_tokens
 
-grpo_config = GRPOConfig(
-    output_dir="timetravel-grpo-out",
-    learning_rate=5e-6,
-    num_train_epochs=1,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRAD_ACCUM,
-    max_steps=GRPO_STEPS,
-    max_completion_length=1024,
-    num_generations=NUM_ROLLOUTS,
-    temperature=0.7,
-    beta=0.001,
-    logging_steps=5,
-    save_steps=50,
-    bf16=False,
-    fp16=True,
-    report_to="wandb",
-    run_name="timetravel-grpo-qwen3-14b",
-)
+    while tokens_left > 0:
+        step_tokens = min(chunk_new_tokens, tokens_left)
+        attention_mask = torch.ones_like(cursor, device=cursor.device)
+        out = model.generate(
+            cursor,
+            attention_mask=attention_mask,
+            max_new_tokens=step_tokens,
+            temperature=temperature,
+            do_sample=do_sample,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        new_ids = out[0][cursor.shape[1]:]
+        if len(new_ids) == 0:
+            break
 
-trainer = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[timetravel_reward],
-    args=grpo_config,
-    train_dataset=train_dataset,
-)
+        generated = torch.cat([generated, new_ids], dim=0)
+        cursor = torch.cat([cursor[0], new_ids]).unsqueeze(0)
+        tokens_left -= len(new_ids)
 
-print("Starting GRPO training...")
-trainer.train()
+        text = tokenizer.decode(generated, skip_special_tokens=True).strip()
+        if parse_action(text) is not None:
+            break
 
-# ── Save ───────────────────────────────────────────────────────────────────────
-model.save_pretrained_merged("timetravel-grpo-final", tokenizer, save_method="merged_16bit")
-print("Saved to timetravel-grpo-final/")
+    return generated
+
+
+def collect_episode(
+    model,
+    tokenizer,
+    *,
+    max_episode_steps: int,
+    generation_max_new_tokens: int,
+    temperature: float,
+    debug_prefix: str | None = None,
+    debug_full_tokens: bool = False,
+) -> tuple[list[tuple], bool]:
+    """Roll out one episode via the OpenEnv HTTP server and return per-step transitions."""
+    import torch
+
+    obs = http_reset()
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    transitions: list[tuple] = []
+
+    model.eval()
+    with torch.inference_mode():
+        for step in range(max_episode_steps):
+            messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
+            prompt_ids = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                enable_thinking=False,
+                return_tensors="pt",
+            ).to(model.device)
+            action_ids = _generate_until_valid_json_action(
+                model,
+                tokenizer,
+                prompt_ids,
+                max_total_new_tokens=generation_max_new_tokens,
+                chunk_new_tokens=min(32, generation_max_new_tokens),
+                temperature=temperature,
+                do_sample=True,
+            )
+            action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
+            action = parse_action(action_text)
+            if action is None:
+                action = {"thinking": "invalid", "action": "abandon", "args": {}}
+
+            obs = http_step(format_action(action))
+
+            if debug_prefix is not None:
+                print(
+                    f"{debug_prefix} step={step+1} action={action.get('action')!r} "
+                    f"pos={obs['position']} reward={obs['reward']:.3f} done={obs['done']}",
+                    flush=True,
+                )
+                if debug_full_tokens:
+                    full_decoded = tokenizer.decode(
+                        action_ids,
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
+                    )
+                    print(f"{debug_prefix} tokens={len(action_ids)} token_ids={action_ids.tolist()}", flush=True)
+                    print(f"{debug_prefix} full_decoded={full_decoded!r}", flush=True)
+
+            messages.append({"role": "assistant", "content": action_text})
+            transitions.append((prompt_ids[0].cpu(), action_ids.cpu(), float(obs["reward"])))
+
+            if action.get("action") == "branch":
+                ago = action.get("args", {}).get("ago", 0)
+                if isinstance(ago, (int, str)):
+                    try:
+                        ago = int(ago)
+                    except (TypeError, ValueError):
+                        ago = 0
+                if ago > 0:
+                    # Truncate chat history to the rewound point so the agent cannot
+                    # see oracle observations from the erased future. This forces it
+                    # to pass information through the instruction field.
+                    keep = 1 + 2 * (step + 1 - ago)
+                    messages = messages[:max(keep, 1)]
+
+            if obs["done"]:
+                break
+
+    model.train()
+    return transitions, infer_success(obs)
+
+
+def compute_episode_return(transitions) -> float:
+    return sum(reward for _, _, reward in transitions)
+
+
+def policy_loss(model, prompt_ids, action_ids, advantage: float):
+    """Compute mean token NLL over action tokens weighted by advantage."""
+    import torch
+
+    input_ids = torch.cat([prompt_ids, action_ids]).unsqueeze(0).to(model.device)
+    labels = torch.full_like(input_ids, -100)
+    labels[0, len(prompt_ids):] = action_ids
+
+    outputs = model(input_ids=input_ids, labels=labels)
+    return outputs.loss * advantage
+
+
+def evaluate_model(
+    model,
+    tokenizer,
+    *,
+    num_episodes: int,
+    max_episode_steps: int,
+    max_new_tokens: int,
+) -> dict:
+    import torch
+
+    successes = 0
+    branch_used = 0
+
+    model.eval()
+    with torch.inference_mode():
+        for _ in range(num_episodes):
+            obs = http_reset()
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            used_branch = False
+
+            for step in range(max_episode_steps):
+                messages.append({"role": "user", "content": obs_to_text(obs, step + 1)})
+                prompt_ids = tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                    return_tensors="pt",
+                ).to(model.device)
+                action_ids = _generate_until_valid_json_action(
+                    model,
+                    tokenizer,
+                    prompt_ids,
+                    max_total_new_tokens=max_new_tokens,
+                    chunk_new_tokens=min(32, max_new_tokens),
+                    temperature=0.0,
+                    do_sample=False,
+                )
+                action_text = tokenizer.decode(action_ids, skip_special_tokens=True).strip()
+                action = parse_action(action_text)
+                if action is None:
+                    action = {"thinking": "invalid", "action": "abandon", "args": {}}
+
+                messages.append({"role": "assistant", "content": action_text})
+                obs = http_step(format_action(action))
+
+                if action.get("action") == "branch":
+                    used_branch = True
+
+                if obs["done"]:
+                    break
+
+            successes += int(infer_success(obs))
+            branch_used += int(used_branch)
+
+    episodes = num_episodes
+    return {
+        "episodes": episodes,
+        "success_rate": successes / episodes,
+        "branch_rate": branch_used / episodes,
+    }
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train an Unsloth model on Time Travel Rewind")
+    parser.add_argument("--model-name", default="unsloth/Qwen3-14B-unsloth-bnb-4bit")
+    parser.add_argument("--output-dir", default="runs/timetravel")
+    parser.add_argument("--env-url", default="http://localhost:7860")
+
+    parser.add_argument("--max-seq-length", type=int, default=4096)
+    parser.add_argument("--load-in-4bit", action="store_true", default=True)
+    parser.add_argument("--lora-rank", type=int, default=32)
+
+    parser.add_argument("--num-train-steps", type=int, default=300)
+    parser.add_argument("--episodes-per-step", type=int, default=4)
+    parser.add_argument("--num-generations", type=int, default=4)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+
+    parser.add_argument("--max-episode-steps", type=int, default=12)
+    parser.add_argument("--generation-max-new-tokens", type=int, default=128)
+
+    parser.add_argument("--eval-every", type=int, default=25)
+    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--print-actions", action="store_true")
+    parser.add_argument("--print-actions-train-steps", type=int, default=3)
+    parser.add_argument("--print-full-tokens", action="store_true")
+    parser.add_argument("--seed", type=int, default=3407)
+
+    parser.add_argument("--wandb-project", default="timetravel")
+    parser.add_argument("--wandb-run-name", default="qwen3-14b-timetravel")
+
+    args = parser.parse_args()
+
+    global ENV_URL
+    ENV_URL = args.env_url
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    import torch
+    from torch.nn.utils import clip_grad_norm_
+    from torch.optim import AdamW
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    try:
+        from unsloth import FastLanguageModel
+    except ImportError as exc:
+        raise ImportError("unsloth is required.") from exc
+
+    # ── W&B ───────────────────────────────────────────────────────────────────
+    try:
+        import wandb
+        wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
+        use_wandb = True
+    except Exception:
+        use_wandb = False
+        print("W&B not available, logging to metrics.jsonl only.", flush=True)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    print(f"Loading model: {args.model_name}", flush=True)
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=args.model_name,
+        load_in_4bit=args.load_in_4bit,
+        max_seq_length=args.max_seq_length,
+        dtype=torch.float16,
+    )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=args.lora_rank,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=args.lora_rank * 2,
+        use_gradient_checkpointing="unsloth",
+        random_state=args.seed,
+    )
+
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    metrics_file = out_dir / "metrics.jsonl"
+
+    # ── Training loop ──────────────────────────────────────────────────────────
+    print("Starting training...", flush=True)
+    model.train()
+    with metrics_file.open("w", encoding="utf-8") as mf:
+        for train_step in range(args.num_train_steps):
+            step_start = time.perf_counter()
+            optimizer.zero_grad(set_to_none=True)
+
+            step_successes = 0
+            step_returns: list[float] = []
+            total_loss_value = 0.0
+            num_transitions = 0
+
+            for episode_idx in range(args.episodes_per_step):
+                group_rollouts = []
+                for gen_idx in range(args.num_generations):
+                    debug_prefix = None
+                    if args.print_actions and train_step < args.print_actions_train_steps:
+                        debug_prefix = f"[train_step={train_step} ep={episode_idx} gen={gen_idx}]"
+                    transitions, success = collect_episode(
+                        model,
+                        tokenizer,
+                        max_episode_steps=args.max_episode_steps,
+                        generation_max_new_tokens=args.generation_max_new_tokens,
+                        temperature=args.temperature,
+                        debug_prefix=debug_prefix,
+                        debug_full_tokens=args.print_full_tokens,
+                    )
+                    ret = compute_episode_return(transitions)
+                    group_rollouts.append((transitions, ret, success))
+                    step_successes += int(success)
+
+                returns = [r for _, r, _ in group_rollouts]
+                mean_ret = sum(returns) / len(returns)
+                std_ret = (sum((r - mean_ret) ** 2 for r in returns) / len(returns)) ** 0.5 + 1e-8
+                advantages = [(r - mean_ret) / std_ret for r in returns]
+                if train_step < args.print_actions_train_steps:
+                    print(
+                        f"[grpo] train_step={train_step} ep={episode_idx} returns={returns} "
+                        f"mean={mean_ret:.3f} std={std_ret:.6f}",
+                        flush=True,
+                    )
+                step_returns.extend(returns)
+
+                for (transitions, _, _), advantage in zip(group_rollouts, advantages):
+                    for prompt_ids, action_ids, _ in transitions:
+                        if len(action_ids) == 0:
+                            continue
+                        loss = policy_loss(model, prompt_ids, action_ids, advantage)
+                        loss.backward()
+                        total_loss_value += float(loss.detach().item())
+                        num_transitions += 1
+
+            if num_transitions > 0:
+                scale = 1.0 / num_transitions
+                for p in model.parameters():
+                    if p.grad is not None:
+                        p.grad.mul_(scale)
+                grad_norm = clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                optimizer.step()
+                step_ms = (time.perf_counter() - step_start) * 1000.0
+                print(
+                    f"[update] train_step={train_step} optimizer.step() transitions={num_transitions} "
+                    f"grad_norm={float(grad_norm):.4f} step_ms={step_ms:.1f}",
+                    flush=True,
+                )
+            else:
+                print(f"[update] train_step={train_step} skipped (no transitions)", flush=True)
+
+            denom = args.episodes_per_step * args.num_generations
+            success_rate = step_successes / denom
+            avg_return = sum(step_returns) / len(step_returns)
+            loss_value = total_loss_value / max(num_transitions, 1)
+
+            row = {
+                "step": train_step,
+                "success_rate": success_rate,
+                "avg_return": avg_return,
+                "loss": loss_value,
+                "num_transitions": num_transitions,
+            }
+
+            if args.eval_every > 0 and (train_step % args.eval_every == 0):
+                eval_metrics = evaluate_model(
+                    model,
+                    tokenizer,
+                    num_episodes=args.eval_episodes,
+                    max_episode_steps=args.max_episode_steps,
+                    max_new_tokens=args.generation_max_new_tokens,
+                )
+                row.update({f"eval_{k}": v for k, v in eval_metrics.items()})
+
+            mf.write(json.dumps(row) + "\n")
+            mf.flush()
+
+            if use_wandb:
+                import wandb
+                wandb.log(row, step=train_step)
+
+            if train_step % 10 == 0:
+                print(
+                    f"step {train_step:4d} | success={success_rate:.0%} | avg_return={avg_return:.3f} | loss={loss_value:.4f}",
+                    flush=True,
+                )
+
+            if args.save_every > 0 and train_step > 0 and (train_step % args.save_every == 0):
+                ckpt_dir = out_dir / f"checkpoint_step_{train_step}"
+                model.save_pretrained(str(ckpt_dir))
+                tokenizer.save_pretrained(str(ckpt_dir))
+
+    final_dir = out_dir / "final_adapter"
+    model.save_pretrained(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+    if use_wandb:
+        import wandb
+        wandb.finish()
+    print(f"Done. Saved adapter to: {final_dir}")
+
+
+if __name__ == "__main__":
+    main()
